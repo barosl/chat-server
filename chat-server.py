@@ -15,7 +15,7 @@ msgs = []
 
 @contextlib.contextmanager
 def user_ctx(sock):
-    user = utils.AttrDict(nick='')
+    user = utils.AttrDict()
     socks[sock] = user
 
     try: yield user
@@ -26,27 +26,19 @@ def validate_nick(nick):
     if ' ' in nick: return False
     return True
 
-def find_nick(nick):
-    return any(x.nick == nick for x in socks.values())
+def nick_exists(nick):
+    return any(x.nick == nick for x in socks.values() if 'nick' in x)
 
 def get_new_nick():
     while True:
         nick = 'User-%d' % random.randrange(10000)
-        if not find_nick(nick): return nick
+        if not nick_exists(nick): return nick
 
 @utils.display_errors
 def proc(sock, path):
     send = lambda x, d: x.send(json.dumps(d))
 
     with user_ctx(sock) as user:
-        user.nick = get_new_nick()
-        yield from send(sock, {'nick': user.nick})
-
-        yield from send(sock, {'msgs': msgs[-1000:]})
-
-        data_s = json.dumps({'users': [x.nick for x in socks.values()]})
-        asyncio.wait([asyncio.async(x.send(data_s)) for x in socks])
-
         while True:
             msg = yield from sock.recv()
             if not msg: break
@@ -56,13 +48,21 @@ def proc(sock, path):
             if 'nick' in data:
                 nick = data.nick.strip()
 
+                if not nick: nick = get_new_nick()
+
                 if not validate_nick(nick):
                     yield from send(sock, {'err': 'Invalid nickname'})
                     continue
 
-                if find_nick(nick):
+                if nick_exists(nick):
                     yield from send(sock, {'err': 'Nickname already in use'})
                     continue
+
+                if 'nick' not in user:
+                    yield from send(sock, {'msgs': msgs[-1000:]})
+
+                    data_s = json.dumps({'users': [x.nick for x in socks.values() if 'nick' in x]})
+                    asyncio.wait([asyncio.async(x.send(data_s)) for x in socks])
 
                 user.nick = nick
                 yield from send(sock, {'nick': nick})
@@ -74,7 +74,7 @@ def proc(sock, path):
                     yield from send(sock, {'err': 'Empty message'})
                     continue
 
-                if not user.nick:
+                if not user.get('nick'):
                     yield from send(sock, {'err': 'Nickname not set'})
                     continue
 
@@ -82,9 +82,9 @@ def proc(sock, path):
                 msgs.append(msg)
 
                 data_s = json.dumps({'msg': msg})
-                asyncio.wait([asyncio.async(x.send(data_s)) for x in socks])
+                asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if 'nick' in y])
 
-    data_s = json.dumps({'users': [x.nick for x in socks.values()]})
+    data_s = json.dumps({'users': [x.nick for x in socks.values() if 'nick' in x]})
     asyncio.wait([asyncio.async(x.send(data_s)) for x in socks])
 
 def main():
