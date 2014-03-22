@@ -10,5 +10,5 @@ def display_errors(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         try: yield from func(*args, **kwargs)
-        except: traceback.print_exc()
+        except Exception: traceback.print_exc()
     return wrapper
