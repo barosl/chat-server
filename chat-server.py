@@ -41,7 +41,7 @@ def nick_exists(nick):
 
 def get_new_nick():
     while True:
-        nick = 'User-%d' % random.randrange(10000)
+        nick = 'User-{}'.format(random.randrange(10000))
         if not nick_exists(nick): return nick
 
 @utils.display_errors
