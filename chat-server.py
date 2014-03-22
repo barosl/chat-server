@@ -33,7 +33,8 @@ def validate_nick(nick):
     return True
 
 def nick_exists(nick):
-    return any(x.nick == nick for x in socks.values() if 'nick' in x)
+    nick = nick.lower()
+    return any(x.nick.lower() == nick for x in socks.values() if 'nick' in x)
 
 def get_new_nick():
     while True:
