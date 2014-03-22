@@ -45,8 +45,7 @@ def proc(sock, path):
         yield from send(sock, {'msgs': msgs[-1000:]})
 
         data_s = json.dumps({'users': [x.nick for x in socks.values()]})
-        for x in socks:
-            yield from x.send(data_s)
+        asyncio.wait([asyncio.async(x.send(data_s)) for x in socks])
 
         while True:
             msg = yield from sock.recv()
@@ -82,12 +81,11 @@ def proc(sock, path):
                 msg = '{nick}: {msg}'.format(nick=user.nick, msg=msg)
                 msgs.append(msg)
 
-                for x in socks:
-                    yield from send(x, {'msg': msg})
+                data_s = json.dumps({'msg': msg})
+                asyncio.wait([asyncio.async(x.send(data_s)) for x in socks])
 
     data_s = json.dumps({'users': [x.nick for x in socks.values()]})
-    for x in socks:
-        yield from x.send(data_s)
+    asyncio.wait([asyncio.async(x.send(data_s)) for x in socks])
 
 def main():
     global msgs
