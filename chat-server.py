@@ -164,7 +164,7 @@ def main():
             msgs = collections.defaultdict(list, json.loads(fp.read()))
     except (FileNotFoundError, ValueError): pass
 
-    coro = websockets.serve(proc, '', PORT)
+    coro = websockets.serve(proc, port=PORT)
     asyncio.get_event_loop().run_until_complete(coro)
 
     try: asyncio.get_event_loop().run_forever()
