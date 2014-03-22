@@ -6,20 +6,26 @@ import random
 import contextlib
 import json
 import utils
+import collections
 
 with open('cfg.py') as fp:
     exec(fp.read())
 
 socks = {}
-msgs = []
+msgs = collections.defaultdict(list)
 
 @contextlib.contextmanager
-def user_ctx(sock):
-    user = utils.AttrDict()
+def user_ctx(sock, finalize):
+    user = utils.AttrDict(
+        chans={}
+    )
     socks[sock] = user
 
     try: yield user
-    finally: del socks[sock]
+    finally:
+        user = socks[sock]
+        del socks[sock]
+        finalize(user)
 
 def validate_nick(nick):
     if not nick: return False
@@ -38,7 +44,17 @@ def get_new_nick():
 def proc(sock, path):
     send = lambda x, d: x.send(json.dumps(d))
 
-    with user_ctx(sock) as user:
+    def finalize(user):
+        for chan in user.chans:
+            data_s = json.dumps({'part': chan, 'user': user.nick})
+            asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
+
+        for chan in user.chans:
+            for chan in user.chans:
+                data_s = json.dumps({'users': [x.nick for x in socks.values() if chan in x.chans]})
+                asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
+
+    with user_ctx(sock, finalize) as user:
         while True:
             msg = yield from sock.recv()
             if not msg: break
@@ -58,41 +74,89 @@ def proc(sock, path):
                     yield from send(sock, {'err': 'Nickname already in use'})
                     continue
 
-                if 'nick' not in user:
-                    yield from send(sock, {'msgs': msgs[-1000:]})
-
-                    data_s = json.dumps({'users': [x.nick for x in socks.values() if 'nick' in x]})
-                    asyncio.wait([asyncio.async(x.send(data_s)) for x in socks])
-
                 user.nick = nick
                 yield from send(sock, {'nick': nick})
 
             elif 'msg' in data:
                 msg = data.msg.strip()
+                chan = data.chan.strip()
 
                 if not msg:
                     yield from send(sock, {'err': 'Empty message'})
                     continue
 
-                if not user.get('nick'):
+                if 'nick' not in user:
                     yield from send(sock, {'err': 'Nickname not set'})
                     continue
 
+                if not chan:
+                    yield from send(sock, {'err': 'Channel not set'})
+                    continue
+
+                if chan not in user.chans:
+                    yield from send(sock, {'err': 'Not in channel'})
+                    continue
+
                 msg = '{nick}: {msg}'.format(nick=user.nick, msg=msg)
-                msgs.append(msg)
+                msgs[chan].append(msg)
 
                 data_s = json.dumps({'msg': msg})
-                asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if 'nick' in y])
+                asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
 
-    data_s = json.dumps({'users': [x.nick for x in socks.values() if 'nick' in x]})
-    asyncio.wait([asyncio.async(x.send(data_s)) for x in socks])
+            elif 'join' in data:
+                chan = data.join.strip().lower()
+
+                if 'nick' not in user:
+                    yield from send(sock, {'err': 'Nickname not set'})
+                    continue
+
+                if len(chan) < 2 or not chan.startswith('#'):
+                    yield from send(sock, {'err': 'Invalid channel'})
+                    continue
+
+                if chan in user.chans:
+                    yield from send(sock, {'err': 'Already in channel'})
+                    continue
+
+                yield from send(sock, {'msgs': msgs[chan][-1000:]})
+
+                user.chans[chan] = None
+
+                data_s = json.dumps({'join': chan, 'user': user.nick})
+                asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
+
+                data_s = json.dumps({'users': [x.nick for x in socks.values() if chan in x.chans]})
+                asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
+
+            elif 'part' in data:
+                chan = data.part.strip().lower()
+
+                if 'nick' not in user:
+                    yield from send(sock, {'err': 'Nickname not set'})
+                    continue
+
+                if len(chan) < 2 or not chan.startswith('#'):
+                    yield from send(sock, {'err': 'Invalid channel'})
+                    continue
+
+                if chan not in user.chans:
+                    yield from send(sock, {'err': 'Not in channel'})
+                    continue
+
+                data_s = json.dumps({'part': chan, 'user': user.nick})
+                asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
+
+                del user.chans[chan]
+
+                data_s = json.dumps({'users': [x.nick for x in socks.values() if chan in x.chans]})
+                asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
 
 def main():
     global msgs
 
     try:
         with open('msgs.txt') as fp:
-            msgs = json.loads(fp.read())
+            msgs = collections.defaultdict(list, json.loads(fp.read()))
     except (FileNotFoundError, ValueError): pass
 
     coro = websockets.serve(proc, '', PORT)
