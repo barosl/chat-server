@@ -42,7 +42,7 @@ def get_new_nick():
 
 @utils.display_errors
 def proc(sock, path):
-    send = lambda x, d: x.send(json.dumps(d))
+    send = lambda d, s=sock: s.send(json.dumps(d))
 
     def finalize(user):
         for chan in user.chans:
@@ -67,34 +67,34 @@ def proc(sock, path):
                 if not nick: nick = get_new_nick()
 
                 if not validate_nick(nick):
-                    yield from send(sock, {'err': 'Invalid nickname'})
+                    yield from send({'err': 'Invalid nickname'})
                     continue
 
                 if nick_exists(nick):
-                    yield from send(sock, {'err': 'Nickname already in use'})
+                    yield from send({'err': 'Nickname already in use'})
                     continue
 
                 user.nick = nick
-                yield from send(sock, {'nick': nick})
+                yield from send({'nick': nick})
 
             elif 'msg' in data:
                 msg = data.msg.strip()
                 chan = data.chan.strip()
 
                 if not msg:
-                    yield from send(sock, {'err': 'Empty message'})
+                    yield from send({'err': 'Empty message'})
                     continue
 
                 if 'nick' not in user:
-                    yield from send(sock, {'err': 'Nickname not set'})
+                    yield from send({'err': 'Nickname not set'})
                     continue
 
                 if not chan:
-                    yield from send(sock, {'err': 'Channel not set'})
+                    yield from send({'err': 'Channel not set'})
                     continue
 
                 if chan not in user.chans:
-                    yield from send(sock, {'err': 'Not in channel'})
+                    yield from send({'err': 'Not in channel'})
                     continue
 
                 msg = '{nick}: {msg}'.format(nick=user.nick, msg=msg)
@@ -107,18 +107,18 @@ def proc(sock, path):
                 chan = data.join.strip().lower()
 
                 if 'nick' not in user:
-                    yield from send(sock, {'err': 'Nickname not set'})
+                    yield from send({'err': 'Nickname not set'})
                     continue
 
                 if len(chan) < 2 or not chan.startswith('#'):
-                    yield from send(sock, {'err': 'Invalid channel'})
+                    yield from send({'err': 'Invalid channel'})
                     continue
 
                 if chan in user.chans:
-                    yield from send(sock, {'err': 'Already in channel'})
+                    yield from send({'err': 'Already in channel'})
                     continue
 
-                yield from send(sock, {'msgs': msgs[chan][-1000:]})
+                yield from send({'msgs': msgs[chan][-1000:]})
 
                 user.chans[chan] = None
 
@@ -132,15 +132,15 @@ def proc(sock, path):
                 chan = data.part.strip().lower()
 
                 if 'nick' not in user:
-                    yield from send(sock, {'err': 'Nickname not set'})
+                    yield from send({'err': 'Nickname not set'})
                     continue
 
                 if len(chan) < 2 or not chan.startswith('#'):
-                    yield from send(sock, {'err': 'Invalid channel'})
+                    yield from send({'err': 'Invalid channel'})
                     continue
 
                 if chan not in user.chans:
-                    yield from send(sock, {'err': 'Not in channel'})
+                    yield from send({'err': 'Not in channel'})
                     continue
 
                 data_s = json.dumps({'part': chan, 'user': user.nick})
