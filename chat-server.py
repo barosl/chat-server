@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+MAX_NICK_LEN = 20
+MAX_MSG_LEN = 100
+
 import websockets
 import asyncio
 import random
@@ -75,6 +78,10 @@ def proc(sock, path):
                     yield from send({'err': 'Nickname already in use'})
                     continue
 
+                if len(nick) > MAX_NICK_LEN:
+                    yield from send({'err': 'Nickname too long (Maximum: {})'.format(MAX_NICK_LEN)})
+                    continue
+
                 if user.chans:
                     data_s = json.dumps({'nick': nick, 'user': user.nick})
                     asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if set(user.chans) & set(y.chans)])
@@ -100,6 +107,10 @@ def proc(sock, path):
 
                 if chan not in user.chans:
                     yield from send({'err': 'Not in channel'})
+                    continue
+
+                if len(msg) > MAX_MSG_LEN:
+                    yield from send({'err': 'Message too long (Maximum: {})'.format(MAX_MSG_LEN)})
                     continue
 
                 msg = '{nick}: {msg}'.format(nick=user.nick, msg=msg)
