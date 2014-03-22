@@ -74,6 +74,10 @@ def proc(sock, path):
                     yield from send({'err': 'Nickname already in use'})
                     continue
 
+                if user.chans:
+                    data_s = json.dumps({'nick': nick, 'user': user.nick})
+                    asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if set(user.chans) & set(y.chans)])
+
                 user.nick = nick
                 yield from send({'nick': nick})
 
