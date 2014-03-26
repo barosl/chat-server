@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
-MAX_NICK_LEN = 20
+MAX_NICK_LEN = 10
 MAX_MSG_LEN = 100
-RECENT_MSG_CNT = 1000
+RECENT_MSG_CNT = 200
 
 LOG_PATH = 'logs/error.log'
 
