@@ -3,6 +3,8 @@
 MAX_NICK_LEN = 20
 MAX_MSG_LEN = 100
 
+LOG_PATH = 'logs/error.log'
+
 import websockets
 import asyncio
 import random
@@ -10,12 +12,24 @@ import contextlib
 import json
 import utils
 import collections
+import logging
+import os
 
 with open('cfg.py') as fp:
     exec(fp.read())
 
 socks = {}
 msgs = collections.defaultdict(list)
+
+try: os.makedirs(os.path.dirname(LOG_PATH))
+except FileExistsError: pass
+
+logger = logging.getLogger(__name__)
+
+err_handler = logging.FileHandler(LOG_PATH)
+err_handler.setLevel(logging.ERROR)
+err_handler.setFormatter(logging.Formatter('\n%(asctime)s %(levelname)s %(message)s'))
+logger.addHandler(err_handler)
 
 @contextlib.contextmanager
 def user_ctx(sock, finalize):
@@ -44,19 +58,22 @@ def get_new_nick():
         nick = 'User-{}'.format(random.randrange(10000))
         if not nick_exists(nick): return nick
 
-@utils.display_errors
+def async(coro):
+    return asyncio.async(utils.log_coro(coro, 'async() failed', logger))
+
+@utils.log_func('proc() failed', logger)
 def proc(sock, path):
     send = lambda d, s=sock: s.send(json.dumps(d))
 
     def finalize(user):
         for chan in user.chans:
             data_s = json.dumps({'part': chan, 'user': user.nick})
-            asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
+            asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
 
         for chan in user.chans:
             for chan in user.chans:
                 data_s = json.dumps({'users': [x.nick for x in socks.values() if chan in x.chans]})
-                asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
+                asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
 
     with user_ctx(sock, finalize) as user:
         while True:
@@ -84,7 +101,7 @@ def proc(sock, path):
 
                 if user.chans:
                     data_s = json.dumps({'nick': nick, 'user': user.nick})
-                    asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if set(user.chans) & set(y.chans)])
+                    asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if set(user.chans) & set(y.chans)])
 
                 user.nick = nick
                 yield from send({'nick': nick})
@@ -117,7 +134,7 @@ def proc(sock, path):
                 msgs[chan].append(msg)
 
                 data_s = json.dumps({'msg': msg})
-                asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
+                asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
 
             elif 'join' in data:
                 chan = data.join.strip().lower()
@@ -139,10 +156,10 @@ def proc(sock, path):
                 user.chans[chan] = None
 
                 data_s = json.dumps({'join': chan, 'user': user.nick})
-                asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
+                asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
 
                 data_s = json.dumps({'users': [x.nick for x in socks.values() if chan in x.chans]})
-                asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
+                asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
 
             elif 'part' in data:
                 chan = data.part.strip().lower()
@@ -160,12 +177,12 @@ def proc(sock, path):
                     continue
 
                 data_s = json.dumps({'part': chan, 'user': user.nick})
-                asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
+                asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
 
                 del user.chans[chan]
 
                 data_s = json.dumps({'users': [x.nick for x in socks.values() if chan in x.chans]})
-                asyncio.wait([asyncio.async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
+                asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
 
 def main():
     global msgs

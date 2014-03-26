@@ -2,3 +2,4 @@
 __pycache__/
 msgs.txt
 /.venv/
+/logs/
