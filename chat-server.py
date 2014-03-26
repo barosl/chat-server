@@ -2,6 +2,7 @@
 
 MAX_NICK_LEN = 20
 MAX_MSG_LEN = 100
+RECENT_MSG_CNT = 1000
 
 LOG_PATH = 'logs/error.log'
 
@@ -151,7 +152,7 @@ def proc(sock, path):
                     yield from send({'err': 'Already in channel'})
                     continue
 
-                yield from send({'msgs': msgs[chan][-1000:]})
+                yield from send({'msgs': msgs[chan][-RECENT_MSG_CNT:]})
 
                 user.chans[chan] = None
 
