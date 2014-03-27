@@ -7,6 +7,9 @@ RECENT_MSG_CNT = 200
 LOG_PATH = 'logs/error.log'
 DB_PATH = 'db/main.db'
 
+IRC_PORT = 6667
+IRC_PREFIX = 'Server'
+
 import websockets
 import asyncio
 import random
@@ -46,27 +49,67 @@ create_tables()
 
 class Client:
     def __init__(self, sock):
-        self.sock = sock
+        if isinstance(sock, websockets.server.WebSocketServerProtocol):
+            self.sock = sock
+            self.send = self.send_ws
+        else:
+            self.rd, self.wr = sock
+            self.send = self.send_irc
 
         self.user = None
 
-    def send(self, data):
-        yield from self.sock.send(data)
+    def send_ws(self, data, cache):
+        buf = cache.get(id(data))
+        if not buf:
+            buf = json.dumps(data)
+            cache[id(data)] = buf
+
+        yield from self.sock.send(buf)
+
+    def send_irc(self, data, cache):
+        buf = cache.get(id(data))
+        if not buf:
+            cacheable, buf = self.prepare_irc_msg(data)
+            if cacheable: cache[id(data)] = buf
+
+        self.wr.write(buf)
+        yield from self.wr.drain()
+
+    def prepare_irc_msg(self, data):
+        if 'msg' in data:
+            nick, msg = data['msg'].split(': ', 1)
+            return True, self.get_irc_bytes(nick, 'privmsg', data['chan'], msg)
+        elif 'nick' in data:
+            return True, self.get_irc_bytes(data['user'], 'nick', data['nick'])
+        elif 'join' in data:
+            return True, self.get_irc_bytes(data['user'], 'join', data['join'])
+        elif 'part' in data:
+            return True, self.get_irc_bytes(data['user'], 'part', data['part'])
+        elif 'users' in data:
+            return False, \
+                self.get_irc_bytes(IRC_PREFIX, '353', self.user.nick, '@', data['chan'], ' '.join(data['users'])) \
+                + self.get_irc_bytes(IRC_PREFIX, '366', self.user.nick, data['chan'], 'End of /NAMES list')
+        else:
+            raise RuntimeError('invalid message type: {}'.format(data))
+
+    @staticmethod
+    def get_irc_bytes(prefix, cmd, *params):
+        return utils.get_irc_msg(prefix, cmd, *params).encode('utf-8')+b'\n'
 
 class User:
-    def __init__(self, name, cli):
-        self.name = name
+    def __init__(self, nick, cli):
+        self.nick = nick
         self.cli = cli
 
         self.chans = {}
 
-    def set_name(self, name):
-        prev_name = self.name
-        self.name = name
+    def set_nick(self, nick):
+        prev_nick = self.nick
+        self.nick = nick
 
-        data_s = json.dumps({'nick': self.name, 'user': prev_name})
         users = set(itertools.chain(*(x.users for x in self.chans)))
-        asyncio.wait([async(x.cli.send(data_s)) for x in users])
+        cache = {}
+        asyncio.wait([async(x.cli.send({'nick': self.nick, 'user': prev_nick}, cache)) for x in users])
 
 class Channel:
     def __init__(self, name):
@@ -76,34 +119,34 @@ class Channel:
 
         chans[self.name.lower()] = self
 
-    def send_to_users(self, data):
-        data_s = json.dumps(data)
-        asyncio.wait([async(x.cli.send(data_s)) for x in self.users])
+    def send_to_users(self, data, owner=None):
+        cache = {}
+        asyncio.wait([async(x.cli.send(data, cache)) for x in self.users if x != owner])
 
     def join(self, user):
         self.users[user] = None
         user.chans[self] = None
 
-        self.send_to_users({'join': self.name, 'user': user.name})
-        self.send_to_users({'users': [x.name for x in self.users]})
+        self.send_to_users({'join': self.name, 'user': user.nick})
+        self.send_to_users({'users': [x.nick for x in self.users], 'chan': self.name})
 
     def part(self, user, closed=False):
         if closed:
             del self.users[user]
             del user.chans[self]
 
-        self.send_to_users({'part': self.name, 'user': user.name})
+        self.send_to_users({'part': self.name, 'user': user.nick})
 
         if not closed:
             del self.users[user]
             del user.chans[self]
 
-        self.send_to_users({'users': [x.name for x in self.users]})
+        self.send_to_users({'users': [x.nick for x in self.users], 'chan': self.name})
 
         if not self.users: del chans[self.name.lower()]
 
-    def send_msg(self, msg):
-        self.send_to_users({'msg': msg})
+    def send_msg(self, msg, owner=None):
+        self.send_to_users({'msg': msg, 'chan': self.name}, owner)
 
 clis = {}
 chans = {}
@@ -120,12 +163,12 @@ def cli_ctx(sock, finalize):
 
 def validate_nick(nick):
     if not nick: return False
-    if ' ' in nick: return False
+    if any(x in nick for x in ' :'): return False
     return True
 
 def nick_exists(nick):
     nick = nick.lower()
-    return any(x.user.name.lower() == nick for x in clis if x.user)
+    return any(x.user.nick.lower() == nick for x in clis if x.user)
 
 def get_new_nick():
     while True:
@@ -135,8 +178,8 @@ def get_new_nick():
 def async(coro):
     return asyncio.async(utils.log_coro(coro, 'async() failed', logger))
 
-@utils.log_func('proc() failed', logger)
-def proc(sock, path):
+@utils.log_func('ws_proc() failed', logger)
+def ws_proc(sock, path):
     send = lambda d, s=sock: s.send(json.dumps(d))
 
     def finalize(cli):
@@ -166,10 +209,10 @@ def proc(sock, path):
                     yield from send({'err': 'Nickname too long (Maximum: {})'.format(MAX_NICK_LEN)})
                     continue
 
-                if cli.user: cli.user.set_name(nick)
+                if cli.user: cli.user.set_nick(nick)
                 else: cli.user = User(nick, cli)
 
-                yield from send({'nick': nick})
+                yield from send({'nick': cli.user.nick})
 
             elif 'msg' in data:
                 msg = data.msg.strip()
@@ -197,7 +240,7 @@ def proc(sock, path):
                     yield from send({'err': 'Message too long (Maximum: {})'.format(MAX_MSG_LEN)})
                     continue
 
-                msg = '{nick}: {msg}'.format(nick=cli.user.name, msg=msg)
+                msg = '{nick}: {msg}'.format(nick=cli.user.nick, msg=msg)
                 chan.send_msg(msg)
 
                 db.execute('INSERT INTO msgs(text, chan) VALUES(:text, :chan)', {
@@ -252,8 +295,132 @@ def proc(sock, path):
 
                 chan.part(cli.user)
 
+def auto_close(func):
+    def wrapper(rd, wr):
+        try: yield from func(rd, wr)
+        finally: wr.close()
+    return wrapper
+
+@auto_close
+@utils.log_func('irc_proc() failed', logger)
+def irc_proc(rd, wr):
+    def finalize(cli):
+        if cli.user: [x.part(cli.user, True) for x in list(cli.user.chans.keys())]
+
+    with cli_ctx((rd, wr), finalize) as cli:
+        def send(*args):
+            cli.wr.write(cli.get_irc_bytes(IRC_PREFIX, args[0], cli.user.nick if cli.user else '*', *args[1:]))
+            yield from cli.wr.drain()
+
+        while True:
+            line = yield from rd.readline()
+            if not line: break
+
+            prefix, cmd, params = utils.parse_irc_msg(line.decode('utf-8'))
+
+            if cmd == 'privmsg':
+                chan_s = params[0] if len(params) > 0 else ''
+                msg = params[1] if len(params) > 1 else ''
+
+                if not cli.user:
+                    yield from send('451', 'You have not registered')
+                    continue
+
+                if not chan_s:
+                    yield from send('411', 'No recipient given')
+                    continue
+
+                if not msg:
+                    yield from send('412', 'No text to send')
+                    continue
+
+                chan = chans.get(chan_s.lower())
+
+                if chan not in cli.user.chans:
+                    yield from send('404', chan_s, 'Cannot send to channel')
+                    continue
+
+                if len(msg) > MAX_MSG_LEN:
+                    yield from send('400', 'PRIVMSG', 'Message too long (Maximum: {})'.format(MAX_MSG_LEN))
+                    continue
+
+                msg = '{nick}: {msg}'.format(nick=cli.user.nick, msg=msg)
+                chan.send_msg(msg, cli.user)
+
+                db.execute('INSERT INTO msgs(text, chan) VALUES(:text, :chan)', {
+                    'text': msg,
+                    'chan': chan.name,
+                })
+                db_c.commit()
+
+            elif cmd == 'nick':
+                nick = params[0] if len(params) > 0 else ''
+
+                if not nick: nick = get_new_nick()
+
+                if not validate_nick(nick) or len(nick) > MAX_NICK_LEN:
+                    yield from send('432', nick, 'Erroneous nickname')
+                    continue
+
+                if nick_exists(nick):
+                    yield from send('433', nick, 'Nickname already in use')
+                    continue
+
+                if cli.user: cli.user.set_nick(nick)
+                else:
+                    cli.user = User(nick, cli)
+                    yield from send('001', 'Welcome to the server')
+                    yield from send('376', 'End of message of the day')
+
+            elif cmd == 'join':
+                chans_s = params[0] if len(params) > 0 else ''
+
+                if not cli.user:
+                    yield from send('451', 'You have not registered')
+                    continue
+
+                for chan_s in chans_s.split(','):
+                    if len(chan_s) < 2 or not chan_s.startswith('#'):
+                        yield from send('403', chan_s, 'No such channel')
+                        continue
+
+                    chan = chans.get(chan_s.lower())
+
+                    if chan in cli.user.chans:
+                        yield from send('400', 'JOIN', 'Already in channel')
+                        continue
+
+                    if not chan: chan = Channel(chan_s)
+
+                    chan.join(cli.user)
+
+            elif cmd == 'part':
+                chan_s = params[0] if len(params) > 0 else ''
+
+                if not cli.user:
+                    yield from send('451', 'You have not registered')
+                    continue
+
+                if len(chan_s) < 2 or not chan_s.startswith('#'):
+                    yield from send('403', chan_s, 'No such channel')
+                    continue
+
+                chan = chans.get(chan_s.lower())
+
+                if chan not in cli.user.chans:
+                    yield from send('442', chan_s, 'You\'re not on that channel')
+                    continue
+
+                chan.part(cli.user)
+
+            elif cmd == 'quit':
+                wr.close()
+
 def main():
-    coro = websockets.serve(proc, port=PORT)
+    coro = websockets.serve(ws_proc, port=PORT)
+    asyncio.get_event_loop().run_until_complete(coro)
+
+    coro = asyncio.start_server(irc_proc, port=IRC_PORT)
     asyncio.get_event_loop().run_until_complete(coro)
 
     try: asyncio.get_event_loop().run_forever()
