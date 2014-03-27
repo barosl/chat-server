@@ -64,19 +64,21 @@ class Client:
         self.user = None
         self.flood_ctrl_wnd = collections.deque()
 
-    def send_ws(self, data, cache):
-        buf = cache.get(id(data))
+    def send_ws(self, data, cache=None):
+        cache_o = cache[0] if cache is not None else {}
+        buf = cache_o.get(id(data))
         if not buf:
             buf = json.dumps(data)
-            cache[id(data)] = buf
+            cache_o[id(data)] = buf
 
         yield from self.sock.send(buf)
 
-    def send_irc(self, data, cache):
-        buf = cache.get(id(data))
+    def send_irc(self, data, cache=None):
+        cache_o = cache[1] if cache is not None else {}
+        buf = cache_o.get(id(data))
         if not buf:
             cacheable, buf = self.prepare_irc_msg(data)
-            if cacheable: cache[id(data)] = buf
+            if cacheable: cache_o[id(data)] = buf
 
         self.wr.write(buf)
         yield from self.wr.drain()
@@ -110,6 +112,10 @@ class Client:
         if len(wnd) == FLOOD_CTRL_CNT: return FLOOD_CTRL_TIME_WND_SIZE - (tm - wnd[0])
         wnd.append(tm)
 
+    @staticmethod
+    def cache_factory():
+        return [{}, {}]
+
 class User:
     def __init__(self, nick, cli):
         self.nick = nick
@@ -122,7 +128,7 @@ class User:
         self.nick = nick
 
         users = set(itertools.chain(*(x.users for x in self.chans)))
-        cache = {}
+        cache = Client.cache_factory()
         asyncio.wait([async(x.cli.send({'nick': self.nick, 'user': prev_nick}, cache)) for x in users])
 
 class Channel:
@@ -134,7 +140,7 @@ class Channel:
         chans[self.name.lower()] = self
 
     def send_to_users(self, data, owner=None):
-        cache = {}
+        cache = Client.cache_factory()
         asyncio.wait([async(x.cli.send(data, cache)) for x in self.users if x != owner])
 
     def join(self, user):
