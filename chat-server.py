@@ -4,6 +4,9 @@ MAX_NICK_LEN = 10
 MAX_MSG_LEN = 100
 RECENT_MSG_CNT = 200
 
+FLOOD_CTRL_TIME_WND_SIZE = 10
+FLOOD_CTRL_CNT = 3
+
 LOG_PATH = 'logs/error.log'
 DB_PATH = 'db/main.db'
 
@@ -20,6 +23,8 @@ import logging
 import os
 import sqlite3
 import itertools
+import time
+import collections
 
 with open('cfg.py') as fp:
     exec(fp.read())
@@ -57,6 +62,7 @@ class Client:
             self.send = self.send_irc
 
         self.user = None
+        self.flood_ctrl_wnd = collections.deque()
 
     def send_ws(self, data, cache):
         buf = cache.get(id(data))
@@ -95,6 +101,14 @@ class Client:
     @staticmethod
     def get_irc_bytes(prefix, cmd, *params):
         return utils.get_irc_msg(prefix, cmd, *params).encode('utf-8')+b'\n'
+
+    def flood_ctrl(self):
+        wnd = self.flood_ctrl_wnd
+
+        tm = time.time()
+        while wnd and tm - wnd[0] > FLOOD_CTRL_TIME_WND_SIZE: wnd.popleft()
+        if len(wnd) == FLOOD_CTRL_CNT: return FLOOD_CTRL_TIME_WND_SIZE - (tm - wnd[0])
+        wnd.append(tm)
 
 class User:
     def __init__(self, nick, cli):
@@ -240,6 +254,11 @@ def ws_proc(sock, path):
                     yield from send({'err': 'Message too long (Maximum: {})'.format(MAX_MSG_LEN)})
                     continue
 
+                secs = cli.flood_ctrl()
+                if secs:
+                    yield from send({'err': 'Blocked by flood control (Wait {:.1f} seconds)'.format(secs)})
+                    continue
+
                 msg = '{nick}: {msg}'.format(nick=cli.user.nick, msg=msg)
                 chan.send_msg(msg)
 
@@ -342,6 +361,11 @@ def irc_proc(rd, wr):
 
                 if len(msg) > MAX_MSG_LEN:
                     yield from send('400', 'PRIVMSG', 'Message too long (Maximum: {})'.format(MAX_MSG_LEN))
+                    continue
+
+                secs = cli.flood_ctrl()
+                if secs:
+                    yield from send('400', 'PRIVMSG', 'Blocked by flood control (Wait {:.1f} seconds)'.format(secs))
                     continue
 
                 msg = '{nick}: {msg}'.format(nick=cli.user.nick, msg=msg)
