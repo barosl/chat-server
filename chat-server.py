@@ -5,6 +5,7 @@ MAX_MSG_LEN = 100
 RECENT_MSG_CNT = 200
 
 LOG_PATH = 'logs/error.log'
+DB_PATH = 'db/main.db'
 
 import websockets
 import asyncio
@@ -12,15 +13,14 @@ import random
 import contextlib
 import json
 import utils
-import collections
 import logging
 import os
+import sqlite3
 
 with open('cfg.py') as fp:
     exec(fp.read())
 
 socks = {}
-msgs = collections.defaultdict(list)
 
 try: os.makedirs(os.path.dirname(LOG_PATH))
 except FileExistsError: pass
@@ -31,6 +31,19 @@ err_handler = logging.FileHandler(LOG_PATH)
 err_handler.setLevel(logging.ERROR)
 err_handler.setFormatter(logging.Formatter('\n%(asctime)s %(levelname)s %(message)s'))
 logger.addHandler(err_handler)
+
+try: os.makedirs(os.path.dirname(DB_PATH))
+except FileExistsError: pass
+
+db_c = sqlite3.connect(DB_PATH)
+db_c.row_factory = sqlite3.Row
+db = db_c.cursor()
+
+def create_tables():
+    db.execute('CREATE TABLE IF NOT EXISTS msgs(id INTEGER PRIMARY KEY, text TEXT, chan TEXT)')
+    db_c.commit()
+
+create_tables()
 
 @contextlib.contextmanager
 def user_ctx(sock, finalize):
@@ -132,7 +145,11 @@ def proc(sock, path):
                     continue
 
                 msg = '{nick}: {msg}'.format(nick=user.nick, msg=msg)
-                msgs[chan].append(msg)
+                db.execute('INSERT INTO msgs(text, chan) VALUES(:text, :chan)', {
+                    'text': msg,
+                    'chan': chan,
+                })
+                db_c.commit()
 
                 data_s = json.dumps({'msg': msg})
                 asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
@@ -152,7 +169,11 @@ def proc(sock, path):
                     yield from send({'err': 'Already in channel'})
                     continue
 
-                yield from send({'msgs': msgs[chan][-RECENT_MSG_CNT:]})
+                db.execute('SELECT * FROM (SELECT id, text FROM msgs WHERE chan=:chan ORDER BY id DESC LIMIT :cnt) ORDER BY id', {
+                    'chan': chan,
+                    'cnt': RECENT_MSG_CNT,
+                })
+                yield from send({'msgs': [row['text'] for row in db]})
 
                 user.chans[chan] = None
 
@@ -186,20 +207,14 @@ def proc(sock, path):
                 asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
 
 def main():
-    global msgs
-
-    try:
-        with open('msgs.txt') as fp:
-            msgs = collections.defaultdict(list, json.loads(fp.read()))
-    except (FileNotFoundError, ValueError): pass
-
     coro = websockets.serve(proc, port=PORT)
     asyncio.get_event_loop().run_until_complete(coro)
 
     try: asyncio.get_event_loop().run_forever()
-    except KeyboardInterrupt:
-        with open('msgs.txt', 'w') as fp:
-            fp.write(json.dumps(msgs))
+    except KeyboardInterrupt: pass
+    finally:
+        db.close()
+        db_c.close()
 
 if __name__ == '__main__':
     main()
