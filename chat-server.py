@@ -16,11 +16,10 @@ import utils
 import logging
 import os
 import sqlite3
+import itertools
 
 with open('cfg.py') as fp:
     exec(fp.read())
-
-socks = {}
 
 try: os.makedirs(os.path.dirname(LOG_PATH))
 except FileExistsError: pass
@@ -45,18 +44,79 @@ def create_tables():
 
 create_tables()
 
-@contextlib.contextmanager
-def user_ctx(sock, finalize):
-    user = utils.AttrDict(
-        chans={}
-    )
-    socks[sock] = user
+class Client:
+    def __init__(self, sock):
+        self.sock = sock
 
-    try: yield user
+        self.user = None
+
+    def send(self, data):
+        yield from self.sock.send(data)
+
+class User:
+    def __init__(self, name, cli):
+        self.name = name
+        self.cli = cli
+
+        self.chans = {}
+
+    def set_name(self, name):
+        prev_name = self.name
+        self.name = name
+
+        data_s = json.dumps({'nick': self.name, 'user': prev_name})
+        users = set(itertools.chain(*(x.users for x in self.chans)))
+        asyncio.wait([async(x.cli.send(data_s)) for x in users])
+
+class Channel:
+    def __init__(self, name):
+        self.name = name
+
+        self.users = {}
+
+        chans[self.name.lower()] = self
+
+    def send_to_users(self, data):
+        data_s = json.dumps(data)
+        asyncio.wait([async(x.cli.send(data_s)) for x in self.users])
+
+    def join(self, user):
+        self.users[user] = None
+        user.chans[self] = None
+
+        self.send_to_users({'join': self.name, 'user': user.name})
+        self.send_to_users({'users': [x.name for x in self.users]})
+
+    def part(self, user, closed=False):
+        if closed:
+            del self.users[user]
+            del user.chans[self]
+
+        self.send_to_users({'part': self.name, 'user': user.name})
+
+        if not closed:
+            del self.users[user]
+            del user.chans[self]
+
+        self.send_to_users({'users': [x.name for x in self.users]})
+
+        if not self.users: del chans[self.name.lower()]
+
+    def send_msg(self, msg):
+        self.send_to_users({'msg': msg})
+
+clis = {}
+chans = {}
+
+@contextlib.contextmanager
+def cli_ctx(sock, finalize):
+    cli = Client(sock)
+    clis[cli] = None
+
+    try: yield cli
     finally:
-        user = socks[sock]
-        del socks[sock]
-        finalize(user)
+        del clis[cli]
+        finalize(cli)
 
 def validate_nick(nick):
     if not nick: return False
@@ -65,7 +125,7 @@ def validate_nick(nick):
 
 def nick_exists(nick):
     nick = nick.lower()
-    return any(x.nick.lower() == nick for x in socks.values() if 'nick' in x)
+    return any(x.user.name.lower() == nick for x in clis if x.user)
 
 def get_new_nick():
     while True:
@@ -79,17 +139,10 @@ def async(coro):
 def proc(sock, path):
     send = lambda d, s=sock: s.send(json.dumps(d))
 
-    def finalize(user):
-        for chan in user.chans:
-            data_s = json.dumps({'part': chan, 'user': user.nick})
-            asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
+    def finalize(cli):
+        if cli.user: [x.part(cli.user, True) for x in list(cli.user.chans.keys())]
 
-        for chan in user.chans:
-            for chan in user.chans:
-                data_s = json.dumps({'users': [x.nick for x in socks.values() if chan in x.chans]})
-                asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
-
-    with user_ctx(sock, finalize) as user:
+    with cli_ctx(sock, finalize) as cli:
         while True:
             msg = yield from sock.recv()
             if not msg: break
@@ -113,30 +166,30 @@ def proc(sock, path):
                     yield from send({'err': 'Nickname too long (Maximum: {})'.format(MAX_NICK_LEN)})
                     continue
 
-                if user.chans:
-                    data_s = json.dumps({'nick': nick, 'user': user.nick})
-                    asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if set(user.chans) & set(y.chans)])
+                if cli.user: cli.user.set_name(nick)
+                else: cli.user = User(nick, cli)
 
-                user.nick = nick
                 yield from send({'nick': nick})
 
             elif 'msg' in data:
                 msg = data.msg.strip()
-                chan = data.chan.strip()
+                chan_s = data.chan.strip()
 
                 if not msg:
                     yield from send({'err': 'Empty message'})
                     continue
 
-                if 'nick' not in user:
+                if not cli.user:
                     yield from send({'err': 'Nickname not set'})
                     continue
 
-                if not chan:
+                if not chan_s:
                     yield from send({'err': 'Channel not set'})
                     continue
 
-                if chan not in user.chans:
+                chan = chans.get(chan_s.lower())
+
+                if chan not in cli.user.chans:
                     yield from send({'err': 'Not in channel'})
                     continue
 
@@ -144,67 +197,60 @@ def proc(sock, path):
                     yield from send({'err': 'Message too long (Maximum: {})'.format(MAX_MSG_LEN)})
                     continue
 
-                msg = '{nick}: {msg}'.format(nick=user.nick, msg=msg)
+                msg = '{nick}: {msg}'.format(nick=cli.user.name, msg=msg)
+                chan.send_msg(msg)
+
                 db.execute('INSERT INTO msgs(text, chan) VALUES(:text, :chan)', {
                     'text': msg,
-                    'chan': chan,
+                    'chan': chan.name,
                 })
                 db_c.commit()
 
-                data_s = json.dumps({'msg': msg})
-                asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
-
             elif 'join' in data:
-                chan = data.join.strip().lower()
+                chan_s = data.join.strip()
 
-                if 'nick' not in user:
+                if not cli.user:
                     yield from send({'err': 'Nickname not set'})
                     continue
 
-                if len(chan) < 2 or not chan.startswith('#'):
+                if len(chan_s) < 2 or not chan_s.startswith('#'):
                     yield from send({'err': 'Invalid channel'})
                     continue
 
-                if chan in user.chans:
+                chan = chans.get(chan_s.lower())
+
+                if chan in cli.user.chans:
                     yield from send({'err': 'Already in channel'})
                     continue
 
+                if not chan: chan = Channel(chan_s)
+
                 db.execute('SELECT * FROM (SELECT id, text FROM msgs WHERE chan=:chan ORDER BY id DESC LIMIT :cnt) ORDER BY id', {
-                    'chan': chan,
+                    'chan': chan.name,
                     'cnt': RECENT_MSG_CNT,
                 })
                 yield from send({'msgs': [row['text'] for row in db]})
 
-                user.chans[chan] = None
-
-                data_s = json.dumps({'join': chan, 'user': user.nick})
-                asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
-
-                data_s = json.dumps({'users': [x.nick for x in socks.values() if chan in x.chans]})
-                asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
+                chan.join(cli.user)
 
             elif 'part' in data:
-                chan = data.part.strip().lower()
+                chan_s = data.part.strip()
 
-                if 'nick' not in user:
+                if not cli.user:
                     yield from send({'err': 'Nickname not set'})
                     continue
 
-                if len(chan) < 2 or not chan.startswith('#'):
+                if len(chan_s) < 2 or not chan_s.startswith('#'):
                     yield from send({'err': 'Invalid channel'})
                     continue
 
-                if chan not in user.chans:
+                chan = chans.get(chan_s.lower())
+
+                if chan not in cli.user.chans:
                     yield from send({'err': 'Not in channel'})
                     continue
 
-                data_s = json.dumps({'part': chan, 'user': user.nick})
-                asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
-
-                del user.chans[chan]
-
-                data_s = json.dumps({'users': [x.nick for x in socks.values() if chan in x.chans]})
-                asyncio.wait([async(x.send(data_s)) for x, y in socks.items() if chan in y.chans])
+                chan.part(cli.user)
 
 def main():
     coro = websockets.serve(proc, port=PORT)
